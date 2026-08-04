@@ -1,0 +1,116 @@
+
+Chasisty Melo
+3:18 PM (1 minute ago)
+to me, Minna
+
+from XRPLib.defaults import drivetrain
+from XRPLib.defaults import rangefinder
+import time
+
+
+FORWARD_EFFORT = 0.45
+TURN_EFFORT = 0.40
+STOP_DISTANCE_CM = 10
+INCHES_TO_CM = 2.54
+
+
+def front_is_clear():
+    try:
+        distance = rangefinder.distance()
+
+        if distance is None or distance <= 0:
+            return True
+
+        return distance > STOP_DISTANCE_CM
+
+    except Exception:
+        return True
+
+
+def forward_inches(inches):
+    total_cm = inches * INCHES_TO_CM
+    traveled_cm = 0
+    step_cm = 2
+
+    while traveled_cm < total_cm:
+        if not front_is_clear():
+            drivetrain.stop()
+            print("Wall detected")
+            return False
+
+        remaining = total_cm - traveled_cm
+        movement = min(step_cm, remaining)
+
+        drivetrain.straight(
+            movement,
+            max_effort=FORWARD_EFFORT
+        )
+
+        traveled_cm += movement
+
+    drivetrain.stop()
+    time.sleep(0.15)
+    return True
+
+
+def left():
+    drivetrain.turn(90, max_effort=TURN_EFFORT)
+    time.sleep(0.3)
+
+
+def right():
+    drivetrain.turn(-90, max_effort=TURN_EFFORT)
+    time.sleep(0.3)
+
+
+def run_autonomous():
+    print("AUTONOMOUS MODE")
+    time.sleep(3)
+
+    route = [
+        ("forward", 18.5),
+        ("left", 0),
+        ("forward", 9),
+        ("left", 0),
+        ("forward", 15),
+        ("right", 0),
+        ("forward", 12),
+        ("right", 0),
+        ("forward", 15),
+        ("left", 0),
+        ("forward", 10),
+        ("right", 0),
+        ("forward", 15),
+        ("right", 0),
+        ("forward", 9),
+        ("left", 0),
+        ("forward", 18),
+        ("left", 0),
+        ("forward", 12),
+        ("right", 0),
+        ("forward", 20),
+        ("right", 0),
+        ("forward", 20),
+        ("left", 0),
+        ("forward", 14),
+        ("left", 0),
+        ("forward", 29)
+    ]
+
+    for command, value in route:
+
+        if command == "forward":
+            completed = forward_inches(value)
+
+            if not completed:
+                drivetrain.stop()
+                return
+
+        elif command == "left":
+            left()
+
+        elif command == "right":
+            right()
+
+    drivetrain.stop()
+    print("MAZE COMPLETE")
