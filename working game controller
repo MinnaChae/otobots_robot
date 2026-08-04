@@ -1,0 +1,71 @@
+from XRPLib.defaults import *
+from pestolink import PestoLinkAgent
+import time
+
+pestolink = PestoLinkAgent("OCHOBOTS")
+
+BUTTON_B = 1
+BUTTON_X = 2
+BUTTON_LT = 6
+BUTTON_RT = 7
+RIGHT_STICK_X = 2
+
+DRIVE_POWER = 0.85
+TURN_POWER = 0.65
+
+SERVO_FORWARD = 90
+SERVO_STOP = 180
+SERVO_REVERSE = 0
+
+
+def deadzone(value):
+    if abs(value) < 0.12:
+        return 0.0
+    return value
+
+
+while True:
+
+    if pestolink.is_connected():
+
+        # RT forward
+        if pestolink.get_button(BUTTON_RT):
+            throttle = DRIVE_POWER
+
+        # LT reverse
+        elif pestolink.get_button(BUTTON_LT):
+            throttle = -DRIVE_POWER
+
+        else:
+            throttle = 0.0
+
+        # Right joystick steering
+        steering = deadzone(
+            pestolink.get_axis(RIGHT_STICK_X)
+        ) * TURN_POWER
+
+        left_power = throttle + steering
+        right_power = throttle - steering
+
+        left_power = max(-1.0, min(1.0, left_power))
+        right_power = max(-1.0, min(1.0, right_power))
+
+        drivetrain.set_effort(left_power, right_power)
+
+        # Hold X: spin Servo 1 one direction
+        if pestolink.get_button(BUTTON_X):
+            servo_one.set_angle(SERVO_FORWARD)
+
+        # Hold B: spin Servo 1 opposite direction
+        elif pestolink.get_button(BUTTON_B):
+            servo_one.set_angle(SERVO_REVERSE)
+
+        # Release X and B: stop servo
+        else:
+            servo_one.set_angle(SERVO_STOP)
+
+    else:
+        drivetrain.stop()
+        servo_one.set_angle(SERVO_STOP)
+
+    time.sleep(0.02)
