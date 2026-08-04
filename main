@@ -1,0 +1,14 @@
+from XRPLib.defaults import board
+import time
+
+print("Hold USER button for MANUAL mode")
+print("Do not press anything for AUTONOMOUS mode")
+
+time.sleep(2)
+
+if board.is_button_pressed():
+    import manual_mode
+    manual_mode.run_manual()
+else:
+    import autonomous_mode
+    autonomous_mode.run_autonomous()
