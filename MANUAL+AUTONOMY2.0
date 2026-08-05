@@ -1,0 +1,737 @@
+# ============================================================
+# XRP ROBOT - PESTOLINK CONTROLLER AND AUTONOMY
+#
+# MANUAL CONTROLS:
+# RT              = Drive forward
+# LT              = Drive backward
+# Right joystick  = Steering
+#
+# SERVO:
+# Tap X once      = Raise Servo 1 and hold position
+# Tap B once      = Lower Servo 1 and hold position
+#
+# AUTONOMY:
+# D-pad Down      = Start maze autonomy
+# D-pad Up        = Start blue-line following
+#
+# RT, LT, or joystick movement cancels autonomy.
+# ============================================================
+
+from XRPLib.defaults import *
+from pestolink import PestoLinkAgent
+import time
+
+
+# ============================================================
+# PESTOLINK CONNECTION
+# ============================================================
+
+pestolink = PestoLinkAgent("OCHOBOTS")
+
+
+# ============================================================
+# CONTROLLER BUTTON ASSIGNMENTS
+# ============================================================
+
+BUTTON_B = 1
+BUTTON_X = 2
+
+BUTTON_LT = 6
+BUTTON_RT = 7
+
+BUTTON_DPAD_UP = 12
+BUTTON_DPAD_DOWN = 13
+
+RIGHT_STICK_X = 2
+
+
+# ============================================================
+# ROBOT MODES
+# ============================================================
+
+MODE_MANUAL = 0
+MODE_MAZE = 1
+MODE_LINE = 2
+
+
+# ============================================================
+# MANUAL DRIVE SETTINGS
+# ============================================================
+
+MANUAL_DRIVE_POWER = 0.85
+MANUAL_TURN_POWER = 0.65
+
+JOYSTICK_DEADZONE = 0.12
+
+
+# ============================================================
+# SERVO 1 SETTINGS
+#
+# This assumes Servo 1 is a normal positional servo.
+#
+# Tap X once:
+# Servo moves to the raised angle and stays there.
+#
+# Tap B once:
+# Servo moves to the lowered angle and stays there.
+# ============================================================
+
+SERVO1_LOWERED_ANGLE = 5
+SERVO1_RAISED_ANGLE = 90
+
+
+# ============================================================
+# MAZE SETTINGS
+# ============================================================
+
+INCHES_TO_CM = 2.54
+
+MAZE_DRIVE_POWER = 0.75
+MAZE_TURN_POWER = 0.65
+
+# Swap these signs if left and right are reversed.
+LEFT_TURN_SIGN = -1
+RIGHT_TURN_SIGN = 1
+
+MAZE_STEP_PAUSE = 0.20
+
+
+# ============================================================
+# PREPROGRAMMED MAZE ROUTE
+#
+# Available commands:
+#
+# ("forward", inches)
+# ("reverse", inches)
+# ("left", degrees)
+# ("right", degrees)
+# ("wait", seconds)
+# ============================================================
+
+MAZE_ROUTE = [
+    ("forward", 12),
+    ("forward", 12),
+
+    ("right", 90),
+
+    ("forward", 9),
+    ("forward", 9),
+
+    ("left", 90),
+
+    ("forward", 10),
+    ("forward", 10),
+    ("forward", 10),
+
+    ("right", 90),
+
+    ("forward", 12)
+]
+
+
+# ============================================================
+# BLUE LINE ON BLACK FLOOR
+#
+# XRP reflectance sensors measure brightness.
+# They do not directly identify colors.
+#
+# These are starting values only.
+# You will likely need to calibrate them on your actual:
+#
+# 1. Black floor
+# 2. Blue line
+# ============================================================
+
+BLACK_FLOOR_READING = 0.10
+BLUE_LINE_READING = 0.35
+
+LINE_BASE_POWER = 0.25
+
+LINE_KP = 0.65
+LINE_MAX_CORRECTION = 0.32
+
+LINE_SEARCH_CORRECTION = 0.30
+
+MIN_CALIBRATION_DIFFERENCE = 0.05
+
+LINE_MAX_TIME_SECONDS = 45.0
+
+
+# ============================================================
+# ROBOT STATE
+# ============================================================
+
+state = {
+    "mode": MODE_MANUAL,
+
+    "servo1_angle": SERVO1_LOWERED_ANGLE,
+
+    "maze_step": 0,
+    "maze_running": False,
+
+    "line_start_time": time.ticks_ms(),
+
+    "last_line_direction": 1,
+
+    "previous_dpad_up": False,
+    "previous_dpad_down": False,
+
+    "previous_x": False,
+    "previous_b": False
+}
+
+
+# ============================================================
+# GENERAL FUNCTIONS
+# ============================================================
+
+def limit(value, minimum=-1.0, maximum=1.0):
+    """Keep a value within the selected limits."""
+
+    if value > maximum:
+        return maximum
+
+    if value < minimum:
+        return minimum
+
+    return value
+
+
+def apply_deadzone(value):
+    """Ignore small accidental joystick movements."""
+
+    if abs(value) < JOYSTICK_DEADZONE:
+        return 0.0
+
+    return value
+
+
+def elapsed_seconds(start_time):
+    """Return elapsed time in seconds."""
+
+    elapsed_ms = time.ticks_diff(
+        time.ticks_ms(),
+        start_time
+    )
+
+    return elapsed_ms / 1000.0
+
+
+def stop_drive():
+    """Stop both drive motors."""
+
+    drivetrain.stop()
+
+
+def hold_servo_position():
+    """
+    Command Servo 1 to remain at its saved position.
+
+    The user does not need to continue holding X or B.
+    """
+
+    servo_one.set_angle(
+        state["servo1_angle"]
+    )
+
+
+def stop_everything():
+    """Stop driving while holding the servo position."""
+
+    stop_drive()
+    hold_servo_position()
+
+
+# ============================================================
+# MODE FUNCTIONS
+# ============================================================
+
+def enter_manual_mode():
+    """Return to manual controller operation."""
+
+    stop_drive()
+
+    state["mode"] = MODE_MANUAL
+    state["maze_running"] = False
+
+
+def enter_maze_mode():
+    """Start the maze route from the beginning."""
+
+    stop_drive()
+
+    state["mode"] = MODE_MAZE
+    state["maze_step"] = 0
+    state["maze_running"] = True
+
+
+def enter_line_mode():
+    """Start blue-line following."""
+
+    stop_drive()
+
+    state["mode"] = MODE_LINE
+    state["line_start_time"] = time.ticks_ms()
+    state["last_line_direction"] = 1
+
+
+# ============================================================
+# SERVO 1 CONTROL
+# ============================================================
+
+def control_servo_one():
+    """
+    X and B use button-edge detection.
+
+    The servo only changes position when the button is first
+    pressed. The user does not need to hold the button.
+    """
+
+    current_x = pestolink.get_button(BUTTON_X)
+    current_b = pestolink.get_button(BUTTON_B)
+
+    # X was just pressed.
+    if current_x and not state["previous_x"]:
+
+        state["servo1_angle"] = SERVO1_RAISED_ANGLE
+
+        servo_one.set_angle(
+            state["servo1_angle"]
+        )
+
+    # B was just pressed.
+    elif current_b and not state["previous_b"]:
+
+        state["servo1_angle"] = SERVO1_LOWERED_ANGLE
+
+        servo_one.set_angle(
+            state["servo1_angle"]
+        )
+
+    state["previous_x"] = current_x
+    state["previous_b"] = current_b
+
+
+# ============================================================
+# MANUAL OVERRIDE
+# ============================================================
+
+def manual_input_detected():
+    """
+    RT, LT, or joystick movement cancels autonomy.
+    """
+
+    if pestolink.get_button(BUTTON_RT):
+        return True
+
+    if pestolink.get_button(BUTTON_LT):
+        return True
+
+    steering = pestolink.get_axis(RIGHT_STICK_X)
+    steering = apply_deadzone(steering)
+
+    if steering != 0.0:
+        return True
+
+    return False
+
+
+# ============================================================
+# MANUAL DRIVING
+# ============================================================
+
+def manual_control():
+    """Drive the robot with RT, LT, and the right joystick."""
+
+    throttle = 0.0
+
+    if pestolink.get_button(BUTTON_RT):
+        throttle = MANUAL_DRIVE_POWER
+
+    elif pestolink.get_button(BUTTON_LT):
+        throttle = -MANUAL_DRIVE_POWER
+
+    steering = pestolink.get_axis(RIGHT_STICK_X)
+    steering = apply_deadzone(steering)
+    steering = steering * MANUAL_TURN_POWER
+
+    left_power = throttle + steering
+    right_power = throttle - steering
+
+    drivetrain.set_effort(
+        limit(left_power),
+        limit(right_power)
+    )
+
+    control_servo_one()
+
+
+# ============================================================
+# MAZE MOVEMENT FUNCTIONS
+# ============================================================
+
+def drive_forward_inches(distance_inches):
+    """Drive forward a selected number of inches."""
+
+    distance_cm = distance_inches * INCHES_TO_CM
+
+    drivetrain.straight(
+        distance_cm,
+        MAZE_DRIVE_POWER
+    )
+
+
+def drive_reverse_inches(distance_inches):
+    """Drive backward a selected number of inches."""
+
+    distance_cm = distance_inches * INCHES_TO_CM
+
+    drivetrain.straight(
+        -distance_cm,
+        MAZE_DRIVE_POWER
+    )
+
+
+def turn_left(degrees):
+    """Turn left a selected number of degrees."""
+
+    turn_amount = abs(degrees) * LEFT_TURN_SIGN
+
+    drivetrain.turn(
+        turn_amount,
+        MAZE_TURN_POWER
+    )
+
+
+def turn_right(degrees):
+    """Turn right a selected number of degrees."""
+
+    turn_amount = abs(degrees) * RIGHT_TURN_SIGN
+
+    drivetrain.turn(
+        turn_amount,
+        MAZE_TURN_POWER
+    )
+
+
+def perform_maze_instruction(action, amount):
+    """Perform one maze-route command."""
+
+    if action == "forward":
+        drive_forward_inches(amount)
+
+    elif action == "reverse":
+        drive_reverse_inches(amount)
+
+    elif action == "left":
+        turn_left(amount)
+
+    elif action == "right":
+        turn_right(amount)
+
+    elif action == "wait":
+        stop_drive()
+        time.sleep(amount)
+
+    else:
+        return False
+
+    return True
+
+
+# ============================================================
+# MAZE AUTONOMY
+# ============================================================
+
+def maze_control():
+    """Run the preprogrammed maze route."""
+
+    control_servo_one()
+
+    if not state["maze_running"]:
+        enter_manual_mode()
+        return
+
+    # Entire route has been completed.
+    if state["maze_step"] >= len(MAZE_ROUTE):
+
+        stop_drive()
+
+        state["maze_running"] = False
+        state["mode"] = MODE_MANUAL
+
+        return
+
+    instruction = MAZE_ROUTE[
+        state["maze_step"]
+    ]
+
+    action = instruction[0]
+    amount = instruction[1]
+
+    valid_instruction = perform_maze_instruction(
+        action,
+        amount
+    )
+
+    if not valid_instruction:
+
+        stop_drive()
+
+        state["maze_running"] = False
+        state["mode"] = MODE_MANUAL
+
+        return
+
+    state["maze_step"] += 1
+
+    stop_drive()
+    time.sleep(MAZE_STEP_PAUSE)
+
+
+# ============================================================
+# BLUE-LINE SENSOR FUNCTIONS
+# ============================================================
+
+def calibration_difference():
+    """Return the difference between blue and black readings."""
+
+    return abs(
+        BLUE_LINE_READING - BLACK_FLOOR_READING
+    )
+
+
+def blue_strength(sensor_value):
+    """
+    Convert the sensor value to an approximate blue amount.
+
+    0.0 means the sensor sees the black floor.
+    1.0 means the sensor sees the blue line.
+
+    This works whether blue produces a higher or lower sensor
+    reading than the black floor.
+    """
+
+    difference = (
+        BLUE_LINE_READING - BLACK_FLOOR_READING
+    )
+
+    if abs(difference) < MIN_CALIBRATION_DIFFERENCE:
+        return 0.0
+
+    strength = (
+        sensor_value - BLACK_FLOOR_READING
+    ) / difference
+
+    return limit(
+        strength,
+        0.0,
+        1.0
+    )
+
+
+# ============================================================
+# BLUE-LINE FOLLOWING
+#
+# The robot uses both reflectance sensors.
+#
+# More blue under the left sensor:
+# Turn left.
+#
+# More blue under the right sensor:
+# Turn right.
+#
+# Neither sensor sees blue:
+# Search toward the last known line position.
+# ============================================================
+
+def line_control():
+    """Follow the blue line against the black floor."""
+
+    control_servo_one()
+
+    line_elapsed = elapsed_seconds(
+        state["line_start_time"]
+    )
+
+    # Safety timeout.
+    if line_elapsed >= LINE_MAX_TIME_SECONDS:
+        enter_manual_mode()
+        return
+
+    # Stop if the calibration values are too similar.
+    if calibration_difference() < MIN_CALIBRATION_DIFFERENCE:
+        stop_drive()
+        enter_manual_mode()
+        return
+
+    left_value = reflectance.get_left()
+    right_value = reflectance.get_right()
+
+    left_blue = blue_strength(left_value)
+    right_blue = blue_strength(right_value)
+
+    # Save which direction most recently detected the line.
+    if left_blue > right_blue + 0.05:
+        state["last_line_direction"] = -1
+
+    elif right_blue > left_blue + 0.05:
+        state["last_line_direction"] = 1
+
+    # Neither sensor currently sees enough blue.
+    if left_blue < 0.20 and right_blue < 0.20:
+
+        if state["last_line_direction"] < 0:
+
+            # Search left.
+            left_power = (
+                LINE_BASE_POWER
+                - LINE_SEARCH_CORRECTION
+            )
+
+            right_power = (
+                LINE_BASE_POWER
+                + LINE_SEARCH_CORRECTION
+            )
+
+        else:
+
+            # Search right.
+            left_power = (
+                LINE_BASE_POWER
+                + LINE_SEARCH_CORRECTION
+            )
+
+            right_power = (
+                LINE_BASE_POWER
+                - LINE_SEARCH_CORRECTION
+            )
+
+        drivetrain.set_effort(
+            limit(left_power),
+            limit(right_power)
+        )
+
+        return
+
+    # Positive error means more blue is under the left sensor.
+    line_error = left_blue - right_blue
+
+    correction = line_error * LINE_KP
+
+    correction = limit(
+        correction,
+        -LINE_MAX_CORRECTION,
+        LINE_MAX_CORRECTION
+    )
+
+    left_power = LINE_BASE_POWER - correction
+    right_power = LINE_BASE_POWER + correction
+
+    drivetrain.set_effort(
+        limit(left_power),
+        limit(right_power)
+    )
+
+
+# ============================================================
+# D-PAD MODE CONTROLS
+# ============================================================
+
+def check_mode_buttons():
+    """Check D-pad Up and D-pad Down."""
+
+    current_dpad_up = pestolink.get_button(
+        BUTTON_DPAD_UP
+    )
+
+    current_dpad_down = pestolink.get_button(
+        BUTTON_DPAD_DOWN
+    )
+
+    # D-pad Down starts maze autonomy.
+    if (
+        current_dpad_down
+        and not state["previous_dpad_down"]
+    ):
+        enter_maze_mode()
+
+    # D-pad Up starts blue-line autonomy.
+    elif (
+        current_dpad_up
+        and not state["previous_dpad_up"]
+    ):
+        enter_line_mode()
+
+    state["previous_dpad_up"] = current_dpad_up
+    state["previous_dpad_down"] = current_dpad_down
+
+
+# ============================================================
+# STARTUP
+# ============================================================
+
+stop_drive()
+
+state["servo1_angle"] = SERVO1_LOWERED_ANGLE
+
+servo_one.set_angle(
+    state["servo1_angle"]
+)
+
+
+# ============================================================
+# MAIN PROGRAM LOOP
+# ============================================================
+
+while True:
+
+    try:
+
+        if pestolink.is_connected():
+
+            # Always check the servo buttons.
+            control_servo_one()
+
+            # RT, LT, or joystick cancels autonomy.
+            if (
+                state["mode"] != MODE_MANUAL
+                and manual_input_detected()
+            ):
+                enter_manual_mode()
+
+            # Check D-pad autonomy controls.
+            check_mode_buttons()
+
+            if state["mode"] == MODE_MANUAL:
+                manual_control()
+
+            elif state["mode"] == MODE_MAZE:
+                maze_control()
+
+            elif state["mode"] == MODE_LINE:
+                line_control()
+
+            else:
+                enter_manual_mode()
+
+        else:
+
+            stop_everything()
+
+            state["mode"] = MODE_MANUAL
+            state["maze_running"] = False
+
+        time.sleep(0.02)
+
+    except Exception as error:
+
+        stop_everything()
+
+        state["mode"] = MODE_MANUAL
+        state["maze_running"] = False
+
+        print("PROGRAM ERROR:")
+        print(error)
+
+        time.sleep(0.50)
