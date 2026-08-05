@@ -18,7 +18,7 @@ BUTTON_Y = 3
 BUTTON_LT = 6
 BUTTON_RT = 7
 
-# This must be tested with your exact controller.
+# This still must be confirmed with your controller.
 BUTTON_DPAD_LEFT = 14
 
 RIGHT_STICK_X = 2
@@ -47,13 +47,12 @@ JOYSTICK_DEADZONE = 0.12
 # SERVO 1 WINCH SETTINGS
 # ==================================================
 #
-# This is a standard positional servo.
+# Standard positional servo:
 #
-# X = raised position
-# B = lowered position
+# X = move winch to raised position
+# B = move winch to lowered position
 #
-# Start with a smaller range to prevent binding.
-# Increase only after testing.
+# This servo does not rotate continuously.
 # ==================================================
 
 SERVO1_LOWERED_ANGLE = 5
@@ -61,75 +60,106 @@ SERVO1_RAISED_ANGLE = 90
 
 
 # ==================================================
-# PREPROGRAMMED MAZE ROUTE
+# PREPROGRAMMED MAZE SETTINGS
 # ==================================================
 
 INCHES_TO_CM = 2.54
 
 MAZE_DRIVE_EFFORT = 0.85
-MAZE_TURN_EFFORT = 0.75
+MAZE_TURN_EFFORT = 0.70
 
 
-# Replace these example instructions with the
-# actual maze route.
+# If the robot turns the wrong direction during
+# testing, swap these two signs.
+LEFT_TURN_SIGN = -1
+RIGHT_TURN_SIGN = 1
+
+
+# Replace these example values with the real route.
 #
 # Available commands:
 #
-# ("forward", distance in inches)
-# ("reverse", distance in inches)
-# ("left", turn angle in degrees)
-# ("right", turn angle in degrees)
+# ("forward", inches)
+# ("reverse", inches)
+# ("left", degrees)
+# ("right", degrees)
+#
+# Long distances are split into shorter steps so
+# the controller gets checked between movements.
 
 MAZE_ROUTE = [
-    ("forward", 24),
+    ("forward", 12),
+    ("forward", 12),
+
     ("right", 90),
-    ("forward", 18),
+
+    ("forward", 9),
+    ("forward", 9),
+
     ("left", 90),
-    ("forward", 30),
+
+    ("forward", 10),
+    ("forward", 10),
+    ("forward", 10),
+
     ("right", 90),
+
     ("forward", 12)
 ]
 
 
 # ==================================================
-# BLUE-LINE EDGE-FOLLOWING SETTINGS
+# BLUE-TAPE EDGE-FOLLOWING SETTINGS
 # ==================================================
+#
+# IMPORTANT:
 #
 # The XRP reflectance sensors measure brightness.
-# They do not actually identify the color blue.
+# They do not identify the color blue directly.
 #
-# These values must be calibrated using the actual
-# blue tape and floor.
+# Replace these two values with readings measured
+# from your actual floor and blue tape.
 # ==================================================
 
-BLUE_LINE_THRESHOLD = 0.45
+FLOOR_READING = 0.75
+BLUE_READING = 0.30
 
-# Set to True when the blue tape produces a higher
-# reading than the floor.
+
+# The robot will follow the LEFT SIDE of the blue
+# tape. The right sensor tracks the tape edge.
 #
-# Set to False when the blue tape produces a lower
-# reading than the floor.
-BLUE_IS_HIGH_READING = True
+# The body of the robot should stay mostly beside
+# the tape instead of directly over the tape.
 
 
-# Keep the line-follow speed moderate so the robot
-# does not overshoot the squiggly path.
-LINE_BASE_POWER = 0.42
+# Target reading halfway between floor and blue.
+BLUE_EDGE_TARGET = (
+    FLOOR_READING + BLUE_READING
+) / 2
 
-LINE_SMALL_CORRECTION = 0.16
-LINE_LARGE_CORRECTION = 0.36
 
-LINE_SEARCH_POWER = 0.28
+# Start slowly while testing.
+LINE_BASE_POWER = 0.30
 
+# Proportional steering strength.
+LINE_KP = 0.55
+
+# Maximum allowed steering correction.
+LINE_MAX_CORRECTION = 0.28
+
+# Strong correction if the left sensor sees blue,
+# meaning the robot crossed too far over the tape.
+LINE_CROSSING_CORRECTION = 0.32
+
+# Minimum difference required between floor and tape.
+MIN_SENSOR_DIFFERENCE = 0.08
+
+# Safety timeout before returning to manual mode.
 LINE_MAX_TIME = 45.0
 
 
 # ==================================================
 # ROBOT STATE
-# ==================================================
-#
-# This dictionary avoids needing several global
-# declarations inside the functions.
 # ==================================================
 
 state = {
@@ -142,10 +172,11 @@ state = {
     "maze_step": 0,
     "maze_running": False,
 
-    "last_line_direction": 1,
-
     "previous_y_button": False,
-    "previous_a_button": False
+    "previous_a_button": False,
+
+    "previous_x_button": False,
+    "previous_b_button": False
 }
 
 
@@ -187,19 +218,14 @@ def stop_drive():
     drivetrain.stop()
 
 
-def hold_servo_position():
-
-    servo_one.set_angle(
-        state["servo1_angle"]
-    )
-
-
 def stop_everything():
 
     stop_drive()
 
-    # Positional servos hold the last commanded angle.
-    hold_servo_position()
+    # Hold the winch at its last selected position.
+    servo_one.set_angle(
+        state["servo1_angle"]
+    )
 
 
 # ==================================================
@@ -228,9 +254,7 @@ def enter_line_mode():
     stop_everything()
 
     state["mode"] = MODE_LINE
-
     state["autonomy_start"] = time.ticks_ms()
-    state["last_line_direction"] = 1
 
 
 def autonomy_elapsed():
@@ -246,26 +270,56 @@ def autonomy_elapsed():
 
 def control_servo_one():
 
-    # X raises the winch.
-    if pestolink.get_button(BUTTON_X):
+    current_x_button = pestolink.get_button(
+        BUTTON_X
+    )
 
-        state["servo1_angle"] = SERVO1_RAISED_ANGLE
-
-
-    # B lowers the winch.
-    elif pestolink.get_button(BUTTON_B):
-
-        state["servo1_angle"] = SERVO1_LOWERED_ANGLE
+    current_b_button = pestolink.get_button(
+        BUTTON_B
+    )
 
 
-    # Send the selected angle to the servo.
-    servo_one.set_angle(
-        state["servo1_angle"]
+    # X was just pressed.
+    if (
+        current_x_button
+        and not state["previous_x_button"]
+    ):
+
+        state["servo1_angle"] = (
+            SERVO1_RAISED_ANGLE
+        )
+
+        servo_one.set_angle(
+            state["servo1_angle"]
+        )
+
+
+    # B was just pressed.
+    elif (
+        current_b_button
+        and not state["previous_b_button"]
+    ):
+
+        state["servo1_angle"] = (
+            SERVO1_LOWERED_ANGLE
+        )
+
+        servo_one.set_angle(
+            state["servo1_angle"]
+        )
+
+
+    state["previous_x_button"] = (
+        current_x_button
+    )
+
+    state["previous_b_button"] = (
+        current_b_button
     )
 
 
 # ==================================================
-# MANUAL DRIVING
+# MANUAL DRIVE CONTROL
 # ==================================================
 
 def manual_control():
@@ -287,28 +341,24 @@ def manual_control():
         throttle = 0.0
 
 
-    # Right joystick steering
     steering = pestolink.get_axis(
         RIGHT_STICK_X
     )
 
     steering = deadzone(steering)
 
-    steering = steering * MANUAL_TURN_POWER
+    steering = (
+        steering * MANUAL_TURN_POWER
+    )
 
 
-    # Arcade-drive calculations
     left_power = throttle + steering
     right_power = throttle - steering
 
 
-    left_power = limit(left_power)
-    right_power = limit(right_power)
-
-
     drivetrain.set_effort(
-        left_power,
-        right_power
+        limit(left_power),
+        limit(right_power)
     )
 
 
@@ -316,12 +366,14 @@ def manual_control():
 
 
 # ==================================================
-# PREPROGRAMMED MAZE MOVEMENT FUNCTIONS
+# PREPROGRAMMED MAZE FUNCTIONS
 # ==================================================
 
 def drive_forward_inches(distance_inches):
 
-    distance_cm = distance_inches * INCHES_TO_CM
+    distance_cm = (
+        distance_inches * INCHES_TO_CM
+    )
 
     drivetrain.straight(
         distance_cm,
@@ -331,7 +383,9 @@ def drive_forward_inches(distance_inches):
 
 def drive_reverse_inches(distance_inches):
 
-    distance_cm = distance_inches * INCHES_TO_CM
+    distance_cm = (
+        distance_inches * INCHES_TO_CM
+    )
 
     drivetrain.straight(
         -distance_cm,
@@ -341,16 +395,24 @@ def drive_reverse_inches(distance_inches):
 
 def turn_left(degrees=90):
 
+    turn_amount = (
+        abs(degrees) * LEFT_TURN_SIGN
+    )
+
     drivetrain.turn(
-        -abs(degrees),
+        turn_amount,
         MAZE_TURN_EFFORT
     )
 
 
 def turn_right(degrees=90):
 
+    turn_amount = (
+        abs(degrees) * RIGHT_TURN_SIGN
+    )
+
     drivetrain.turn(
-        abs(degrees),
+        turn_amount,
         MAZE_TURN_EFFORT
     )
 
@@ -361,7 +423,7 @@ def turn_right(degrees=90):
 
 def maze_control():
 
-    # Check Servo 1 before each route step.
+    # Servo is checked between route steps.
     control_servo_one()
 
 
@@ -371,7 +433,7 @@ def maze_control():
         return
 
 
-    # Route is complete.
+    # Finished every route instruction.
     if state["maze_step"] >= len(MAZE_ROUTE):
 
         state["maze_running"] = False
@@ -412,7 +474,7 @@ def maze_control():
 
     else:
 
-        # Unknown route instruction.
+        # Invalid route instruction.
         stop_drive()
 
         state["maze_running"] = False
@@ -421,99 +483,99 @@ def maze_control():
         return
 
 
-    # Advance to the next route instruction.
+    # Move to the next maze instruction.
     state["maze_step"] += 1
 
 
 # ==================================================
-# BLUE-LINE SENSOR FUNCTION
+# BLUE-TAPE SENSOR HELPERS
 # ==================================================
 
-def sensor_sees_blue(sensor_value):
+def sensor_difference():
 
-    if BLUE_IS_HIGH_READING:
+    return abs(
+        FLOOR_READING - BLUE_READING
+    )
 
-        return sensor_value >= BLUE_LINE_THRESHOLD
 
-    else:
+def sensor_blue_amount(sensor_value):
 
-        return sensor_value <= BLUE_LINE_THRESHOLD
+    difference = (
+        BLUE_READING - FLOOR_READING
+    )
+
+
+    # Prevent division by a very small number.
+    if abs(difference) < MIN_SENSOR_DIFFERENCE:
+
+        return 0.0
+
+
+    # Approximately:
+    #
+    # 0 = floor
+    # 1 = blue tape
+    return (
+        sensor_value - FLOOR_READING
+    ) / difference
+
+
+def left_sensor_has_crossed_blue(left_value):
+
+    blue_amount = sensor_blue_amount(
+        left_value
+    )
+
+    return blue_amount >= 0.65
 
 
 # ==================================================
-# BLUE-LINE EDGE-FOLLOWING AUTONOMY
+# BLUE-TAPE EDGE FOLLOWING
 # ==================================================
 
 def line_control():
 
-    # Servo remains available during line autonomy.
     control_servo_one()
 
 
-    # Safety timeout returns the robot to manual.
+    # Safety timeout.
     if autonomy_elapsed() >= LINE_MAX_TIME:
 
         enter_manual_mode()
         return
 
 
-    # Read the reflectance sensors.
+    # Calibration safety check.
+    if sensor_difference() < MIN_SENSOR_DIFFERENCE:
+
+        stop_drive()
+        enter_manual_mode()
+        return
+
+
     left_value = reflectance.get_left()
     right_value = reflectance.get_right()
 
 
-    left_sees_blue = sensor_sees_blue(
-        left_value
-    )
-
-    right_sees_blue = sensor_sees_blue(
-        right_value
-    )
-
-
     # ------------------------------------------------
-    # DESIRED POSITION
+    # SAFETY CONDITION
     #
-    # The blue tape should remain between the sensors
-    # or immediately beside them.
+    # If the left sensor sees blue, the robot has
+    # crossed too far over the tape.
     #
-    # The robot should travel along the blue path
-    # rather than placing its center directly over it.
+    # Turn sharply left to move back beside the tape.
     # ------------------------------------------------
 
-
-    # Neither sensor sees blue:
-    # Continue forward while the blue tape remains
-    # between the two sensors.
-    if (
-        not left_sees_blue
-        and not right_sees_blue
-    ):
-
-        drivetrain.set_effort(
-            LINE_BASE_POWER,
-            LINE_BASE_POWER
-        )
-
-
-    # Left sensor touches the blue line:
-    # Correct toward the right.
-    elif (
-        left_sees_blue
-        and not right_sees_blue
-    ):
-
-        state["last_line_direction"] = 1
-
+    if left_sensor_has_crossed_blue(left_value):
 
         left_power = (
             LINE_BASE_POWER
-            + LINE_SMALL_CORRECTION
+            - LINE_CROSSING_CORRECTION
         )
 
         right_power = (
             LINE_BASE_POWER
-            - LINE_SMALL_CORRECTION
+            + LINE_CROSSING_CORRECTION
         )
 
 
@@ -522,70 +584,57 @@ def line_control():
             limit(right_power)
         )
 
-
-    # Right sensor touches the blue line:
-    # Correct toward the left.
-    elif (
-        right_sees_blue
-        and not left_sees_blue
-    ):
-
-        state["last_line_direction"] = -1
+        return
 
 
-        left_power = (
-            LINE_BASE_POWER
-            - LINE_SMALL_CORRECTION
-        )
+    # ------------------------------------------------
+    # RIGHT-SENSOR EDGE FOLLOWING
+    #
+    # The right sensor should stay halfway between
+    # the floor reading and blue-tape reading.
+    # ------------------------------------------------
 
-        right_power = (
-            LINE_BASE_POWER
-            + LINE_SMALL_CORRECTION
-        )
-
-
-        drivetrain.set_effort(
-            limit(left_power),
-            limit(right_power)
-        )
+    difference = (
+        BLUE_READING - FLOOR_READING
+    )
 
 
-    # Both sensors see blue:
-    # The robot has moved too far across the tape.
-    # Make a stronger correction using the last
-    # known direction.
-    else:
-
-        if state["last_line_direction"] < 0:
-
-            left_power = (
-                LINE_BASE_POWER
-                + LINE_LARGE_CORRECTION
-            )
-
-            right_power = (
-                LINE_BASE_POWER
-                - LINE_LARGE_CORRECTION
-            )
+    normalized_error = (
+        right_value - BLUE_EDGE_TARGET
+    ) / difference
 
 
-        else:
-
-            left_power = (
-                LINE_BASE_POWER
-                - LINE_LARGE_CORRECTION
-            )
-
-            right_power = (
-                LINE_BASE_POWER
-                + LINE_LARGE_CORRECTION
-            )
+    correction = (
+        normalized_error * LINE_KP
+    )
 
 
-        drivetrain.set_effort(
-            limit(left_power),
-            limit(right_power)
-        )
+    correction = limit(
+        correction,
+        -LINE_MAX_CORRECTION,
+        LINE_MAX_CORRECTION
+    )
+
+
+    # More blue than desired:
+    # steer left, away from the tape.
+    #
+    # More floor than desired:
+    # steer right, toward the tape.
+
+    left_power = (
+        LINE_BASE_POWER - correction
+    )
+
+    right_power = (
+        LINE_BASE_POWER + correction
+    )
+
+
+    drivetrain.set_effort(
+        limit(left_power),
+        limit(right_power)
+    )
 
 
 # ==================================================
@@ -603,7 +652,7 @@ def check_mode_buttons():
     )
 
 
-    # Press Y once to start maze autonomy.
+    # Y starts preprogrammed maze autonomy.
     if (
         current_y_button
         and not state["previous_y_button"]
@@ -612,7 +661,7 @@ def check_mode_buttons():
         enter_maze_mode()
 
 
-    # Press A once to start blue-line autonomy.
+    # A starts blue-line edge following.
     if (
         current_a_button
         and not state["previous_a_button"]
@@ -642,6 +691,16 @@ def manual_override_pressed():
 
 
 # ==================================================
+# STARTUP
+# ==================================================
+
+# Put Servo 1 in its initial lowered position.
+servo_one.set_angle(
+    SERVO1_LOWERED_ANGLE
+)
+
+
+# ==================================================
 # MAIN PROGRAM LOOP
 # ==================================================
 
@@ -649,7 +708,7 @@ while True:
 
     if pestolink.is_connected():
 
-        # D-pad left immediately requests manual mode.
+        # D-pad left cancels autonomy.
         if manual_override_pressed():
 
             if state["mode"] != MODE_MANUAL:
@@ -663,7 +722,6 @@ while True:
             continue
 
 
-        # Check Y and A for autonomy selection.
         check_mode_buttons()
 
 
@@ -689,7 +747,6 @@ while True:
 
     else:
 
-        # Stop safely if the controller disconnects.
         stop_everything()
 
         state["mode"] = MODE_MANUAL
