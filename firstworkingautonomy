@@ -1,0 +1,1026 @@
+# ============================================================
+# XRP ROBOT - COMPLETE THREE-MODE PROGRAM
+#
+# MODES:
+# 1. Manual gamepad driving
+# 2. Autonomous measured maze
+# 3. Autonomous blue-tape line following
+#
+# CONTROLS:
+# RT                 = manual forward
+# LT                 = manual reverse
+# Right joystick     = manual steering
+# Hold X             = Servo 1 direction 1
+# Hold B             = Servo 1 direction 2
+#
+# Hold D-pad DOWN    = start autonomous maze
+# Hold D-pad UP      = start autonomous line follower
+#
+# Hold A for 3 sec   = emergency stop and return to manual
+# ============================================================
+
+from XRPLib.defaults import *
+from pestolink import PestoLinkAgent
+import time
+
+
+# ============================================================
+#                  PESTOLINK CONNECTION
+# ============================================================
+
+# Keep the robot name at eight characters or fewer.
+ROBOT_NAME = "OCHOBOTS"
+
+pestolink = PestoLinkAgent(ROBOT_NAME)
+
+
+# ============================================================
+#               GAMEPAD BUTTON AND AXIS MAP
+# ============================================================
+
+BUTTON_A = 0
+BUTTON_B = 1
+BUTTON_X = 2
+BUTTON_Y = 3
+
+BUTTON_LT = 6
+BUTTON_RT = 7
+
+DPAD_UP = 12
+DPAD_DOWN = 13
+DPAD_LEFT = 14
+DPAD_RIGHT = 15
+
+LEFT_STICK_X = 0
+LEFT_STICK_Y = 1
+RIGHT_STICK_X = 2
+RIGHT_STICK_Y = 3
+
+
+# ============================================================
+#                       ROBOT MODES
+# ============================================================
+
+MODE_MANUAL = 0
+MODE_MAZE = 1
+MODE_LINE = 2
+
+current_mode = MODE_MANUAL
+
+
+# ============================================================
+#                  GENERAL ROBOT SETTINGS
+# ============================================================
+
+MANUAL_DRIVE_SPEED = 0.65
+MANUAL_TURN_SPEED = 0.55
+JOYSTICK_DEADZONE = 0.08
+
+SERVO_FORWARD = 90
+SERVO_STOP = 180
+SERVO_REVERSE = 0
+
+# Hold D-pad Up or Down this long to activate autonomy.
+MODE_HOLD_TIME_MS = 750
+
+# Hold A this long to activate emergency stop.
+EMERGENCY_STOP_HOLD_MS = 3000
+
+# Front range-sensor safety distance.
+FRONT_STOP_DISTANCE_CM = 10.0
+
+INVALID_DISTANCE_CM = 65535
+
+
+# ============================================================
+#                     MAZE SETTINGS
+# ============================================================
+
+INCHES_TO_CM = 2.54
+
+# Lower effort reduces slipping on a smooth floor.
+MAZE_DRIVE_EFFORT = 0.55
+MAZE_TURN_EFFORT = 0.45
+
+# Calibrate these separately if necessary.
+LEFT_TURN_DEGREES = 90
+RIGHT_TURN_DEGREES = -90
+
+# Global distance calibration.
+#
+# If the robot travels 3% too far:
+# DISTANCE_SCALE = 0.97
+#
+# If it travels 3% too short:
+# DISTANCE_SCALE = 1.03
+DISTANCE_SCALE = 1.00
+
+# Optional amount removed from every maze straightaway.
+DISTANCE_TRIM_INCHES = 0.0
+
+# Smaller chunks create more frequent safety checks.
+MAZE_CHUNK_CM = 2.0
+
+MAZE_STRAIGHT_TIMEOUT = 4.0
+MAZE_TURN_TIMEOUT = 4.0
+
+MAZE_STRAIGHT_PAUSE = 0.05
+MAZE_TURN_PAUSE = 0.20
+
+
+# ============================================================
+#               BLUE-LINE FOLLOWER SETTINGS
+# ============================================================
+
+LINE_BASE_SPEED = 0.26
+LINE_MIN_SPEED = 0.12
+LINE_MAX_EFFORT = 0.48
+
+# Steering response.
+LINE_KP = 0.75
+LINE_KD = 0.18
+
+LINE_LOOP_DELAY = 0.012
+
+# Change this to True if the robot corrects away from the tape.
+REVERSE_LINE_STEERING = False
+
+# Change this if the sensor values are opposite of expectations.
+INVERT_LINE_READINGS = False
+
+# Minimum difference between left and right sensor readings.
+LINE_MIN_DIFFERENCE = 0.025
+
+# How long the robot searches after losing the tape.
+LINE_SEARCH_TIMEOUT_MS = 1800
+
+LINE_SEARCH_EFFORT = 0.17
+
+
+# ============================================================
+#                       MAZE ROUTE
+# ============================================================
+
+# F = forward in inches
+# L = left turn
+# R = right turn
+
+MAZE_ROUTE = [
+    ("F", 18.5),
+    ("L", 0),
+
+    ("F", 9),
+    ("L", 0),
+
+    ("F", 15),
+    ("R", 0),
+
+    ("F", 12),
+    ("R", 0),
+
+    ("F", 15),
+    ("L", 0),
+
+    ("F", 10),
+    ("R", 0),
+
+    ("F", 15),
+    ("R", 0),
+
+    ("F", 9),
+    ("L", 0),
+
+    ("F", 18),
+    ("L", 0),
+
+    ("F", 12),
+    ("R", 0),
+
+    ("F", 20),
+    ("R", 0),
+
+    ("F", 20),
+    ("L", 0),
+
+    ("F", 14),
+    ("L", 0),
+
+    ("F", 29)
+]
+
+
+# ============================================================
+#                  EMERGENCY-STOP TRACKING
+# ============================================================
+
+# Stores when A first began being held.
+a_button_hold_start = None
+
+# Prevents the countdown from printing too frequently.
+last_emergency_countdown = None
+
+
+# ============================================================
+#                    GENERAL FUNCTIONS
+# ============================================================
+
+def limit(value, minimum, maximum):
+    """Keeps a value inside the requested limits."""
+
+    if value > maximum:
+        return maximum
+
+    if value < minimum:
+        return minimum
+
+    return value
+
+
+def apply_deadzone(value, deadzone=JOYSTICK_DEADZONE):
+    """Removes small unwanted joystick movement."""
+
+    if abs(value) < deadzone:
+        return 0.0
+
+    return value
+
+
+def stop_all():
+    """Stops the drive motors and the continuous-rotation Servo 1."""
+
+    drivetrain.stop()
+    servo_one.set_angle(SERVO_STOP)
+
+
+def controller_disconnected():
+    """Returns True when PestoLink is not connected."""
+
+    return not pestolink.is_connected()
+
+
+def wait_for_button_release(button_number):
+    """Waits until the selected button has been released."""
+
+    while pestolink.is_connected():
+
+        if not pestolink.get_button(button_number):
+            return
+
+        time.sleep(0.02)
+
+
+# ============================================================
+#                  3-SECOND EMERGENCY STOP
+# ============================================================
+
+def emergency_stop_requested():
+    """
+    Returns True only after A has been held continuously
+    for three seconds.
+
+    This function is nonblocking. The robot can continue
+    checking sensors and operating while the hold is counted.
+    """
+
+    global a_button_hold_start
+    global last_emergency_countdown
+
+    # A is not currently held.
+    if not pestolink.get_button(BUTTON_A):
+
+        a_button_hold_start = None
+        last_emergency_countdown = None
+
+        return False
+
+    # A was just pressed.
+    if a_button_hold_start is None:
+
+        a_button_hold_start = time.ticks_ms()
+        last_emergency_countdown = None
+
+        print("Hold A for emergency stop")
+
+        return False
+
+    elapsed_ms = time.ticks_diff(
+        time.ticks_ms(),
+        a_button_hold_start
+    )
+
+    remaining_ms = EMERGENCY_STOP_HOLD_MS - elapsed_ms
+
+    # Print a simple countdown.
+    if remaining_ms > 0:
+
+        seconds_remaining = (
+            remaining_ms + 999
+        ) // 1000
+
+        if seconds_remaining != last_emergency_countdown:
+
+            print(
+                "Emergency stop in",
+                seconds_remaining
+            )
+
+            last_emergency_countdown = seconds_remaining
+
+        return False
+
+    stop_all()
+
+    print("EMERGENCY STOP ACTIVATED")
+
+    a_button_hold_start = None
+    last_emergency_countdown = None
+
+    return True
+
+
+# ============================================================
+#                    FRONT WALL SENSOR
+# ============================================================
+
+def get_front_distance():
+    """Reads the front ultrasonic/range sensor."""
+
+    try:
+
+        distance = rangefinder.distance()
+
+        if distance is None:
+            return INVALID_DISTANCE_CM
+
+        if distance <= 0:
+            return INVALID_DISTANCE_CM
+
+        return distance
+
+    except Exception:
+
+        return INVALID_DISTANCE_CM
+
+
+def front_wall_detected():
+    """
+    Requires two close readings before stopping.
+
+    This reduces false stops caused by one bad reading.
+    """
+
+    first_reading = get_front_distance()
+
+    if first_reading >= FRONT_STOP_DISTANCE_CM:
+        return False
+
+    time.sleep(0.012)
+
+    second_reading = get_front_distance()
+
+    return second_reading < FRONT_STOP_DISTANCE_CM
+
+
+# ============================================================
+#                     BUTTON-HOLD LOGIC
+# ============================================================
+
+def mode_button_held(button_number, hold_time_ms):
+    """
+    Returns True when a D-pad button remains held for the
+    requested activation time.
+    """
+
+    if not pestolink.get_button(button_number):
+        return False
+
+    start_time = time.ticks_ms()
+
+    while pestolink.get_button(button_number):
+
+        if controller_disconnected():
+            stop_all()
+            return False
+
+        if emergency_stop_requested():
+            stop_all()
+            return False
+
+        elapsed_ms = time.ticks_diff(
+            time.ticks_ms(),
+            start_time
+        )
+
+        if elapsed_ms >= hold_time_ms:
+            return True
+
+        time.sleep(0.02)
+
+    return False
+
+
+# ============================================================
+#                     MANUAL CONTROL
+# ============================================================
+
+def manual_control_step():
+    """
+    Performs one manual-control update.
+
+    Returns one of the three operating modes.
+    """
+
+    if controller_disconnected():
+
+        stop_all()
+        return MODE_MANUAL
+
+    # Holding A for three seconds also stops manual operation.
+    if emergency_stop_requested():
+
+        stop_all()
+        wait_for_button_release(BUTTON_A)
+
+        return MODE_MANUAL
+
+    # --------------------------------------------------------
+    # D-pad Down starts autonomous maze mode.
+    # --------------------------------------------------------
+
+    if pestolink.get_button(DPAD_DOWN):
+
+        stop_all()
+
+        if mode_button_held(
+            DPAD_DOWN,
+            MODE_HOLD_TIME_MS
+        ):
+
+            wait_for_button_release(DPAD_DOWN)
+
+            print("MAZE MODE SELECTED")
+
+            return MODE_MAZE
+
+    # --------------------------------------------------------
+    # D-pad Up starts autonomous blue-line mode.
+    # --------------------------------------------------------
+
+    if pestolink.get_button(DPAD_UP):
+
+        stop_all()
+
+        if mode_button_held(
+            DPAD_UP,
+            MODE_HOLD_TIME_MS
+        ):
+
+            wait_for_button_release(DPAD_UP)
+
+            print("LINE MODE SELECTED")
+
+            return MODE_LINE
+
+    # --------------------------------------------------------
+    # Manual forward and reverse using the verified controls.
+    # --------------------------------------------------------
+
+    if pestolink.get_button(BUTTON_RT):
+        throttle = 0.85
+    elif pestolink.get_button(BUTTON_LT):
+        throttle = -0.85
+    else:
+        throttle = 0.0
+
+    # Right joystick steering.
+    steering = apply_deadzone(
+        pestolink.get_axis(RIGHT_STICK_X),
+        deadzone=0.12
+    ) * 0.65
+
+    left_power = throttle + steering
+    right_power = throttle - steering
+
+    left_power = limit(left_power, -1.0, 1.0)
+    right_power = limit(right_power, -1.0, 1.0)
+
+    drivetrain.set_effort(left_power, right_power)
+
+    # Continuous-rotation Servo 1 control.
+    if pestolink.get_button(BUTTON_X):
+        servo_one.set_angle(SERVO_FORWARD)
+    elif pestolink.get_button(BUTTON_B):
+        servo_one.set_angle(SERVO_REVERSE)
+    else:
+        servo_one.set_angle(SERVO_STOP)
+
+    return MODE_MANUAL
+
+
+# ============================================================
+#                     MAZE FUNCTIONS
+# ============================================================
+
+def corrected_maze_distance(distance_inches):
+    """
+    Applies calibration and converts inches to centimeters.
+    """
+
+    corrected_inches = (
+        distance_inches - DISTANCE_TRIM_INCHES
+    ) * DISTANCE_SCALE
+
+    if corrected_inches < 0:
+        corrected_inches = 0
+
+    return corrected_inches * INCHES_TO_CM
+
+
+def maze_forward(distance_inches):
+    """
+    Drives one maze straightaway in small sections.
+    """
+
+    target_cm = corrected_maze_distance(
+        distance_inches
+    )
+
+    completed_cm = 0.0
+
+    while completed_cm < target_cm:
+
+        if emergency_stop_requested():
+
+            stop_all()
+            print("MAZE EMERGENCY STOP")
+
+            return False
+
+        if controller_disconnected():
+
+            stop_all()
+            print("CONTROLLER DISCONNECTED")
+
+            return False
+
+        if front_wall_detected():
+
+            stop_all()
+
+            print("MAZE WALL STOP")
+            print(
+                "Front distance:",
+                get_front_distance(),
+                "cm"
+            )
+
+            return False
+
+        remaining_cm = target_cm - completed_cm
+
+        current_chunk_cm = min(
+            MAZE_CHUNK_CM,
+            remaining_cm
+        )
+
+        movement_completed = drivetrain.straight(
+            current_chunk_cm,
+            max_effort=MAZE_DRIVE_EFFORT,
+            timeout=MAZE_STRAIGHT_TIMEOUT
+        )
+
+        drivetrain.stop()
+
+        if not movement_completed:
+
+            print("MAZE STRAIGHT MOVEMENT TIMED OUT")
+            return False
+
+        completed_cm += current_chunk_cm
+
+        time.sleep(0.02)
+
+    drivetrain.stop()
+    time.sleep(MAZE_STRAIGHT_PAUSE)
+
+    return True
+
+
+def maze_turn_left():
+    """Performs one calibrated left turn."""
+
+    if emergency_stop_requested():
+        stop_all()
+        return False
+
+    drivetrain.stop()
+    time.sleep(0.08)
+
+    turn_completed = drivetrain.turn(
+        LEFT_TURN_DEGREES,
+        max_effort=MAZE_TURN_EFFORT,
+        timeout=MAZE_TURN_TIMEOUT,
+        use_imu=True
+    )
+
+    drivetrain.stop()
+    time.sleep(MAZE_TURN_PAUSE)
+
+    if not turn_completed:
+
+        print("LEFT TURN TIMED OUT")
+        return False
+
+    return True
+
+
+def maze_turn_right():
+    """Performs one calibrated right turn."""
+
+    if emergency_stop_requested():
+        stop_all()
+        return False
+
+    drivetrain.stop()
+    time.sleep(0.08)
+
+    turn_completed = drivetrain.turn(
+        RIGHT_TURN_DEGREES,
+        max_effort=MAZE_TURN_EFFORT,
+        timeout=MAZE_TURN_TIMEOUT,
+        use_imu=True
+    )
+
+    drivetrain.stop()
+    time.sleep(MAZE_TURN_PAUSE)
+
+    if not turn_completed:
+
+        print("RIGHT TURN TIMED OUT")
+        return False
+
+    return True
+
+
+def run_maze_autonomous():
+    """
+    Runs the complete measured maze without user steering.
+    """
+
+    stop_all()
+
+    print("AUTONOMOUS MAZE MODE")
+    print("Starting in 2 seconds")
+
+    time.sleep(2)
+
+    for step_number, step in enumerate(MAZE_ROUTE):
+
+        command = step[0]
+        value = step[1]
+
+        print(
+            "Maze step",
+            step_number + 1,
+            "of",
+            len(MAZE_ROUTE),
+            command,
+            value
+        )
+
+        if emergency_stop_requested():
+
+            stop_all()
+            print("MAZE CANCELLED")
+
+            return
+
+        if command == "F":
+
+            if not maze_forward(value):
+                stop_all()
+                return
+
+        elif command == "L":
+
+            if not maze_turn_left():
+                stop_all()
+                return
+
+        elif command == "R":
+
+            if not maze_turn_right():
+                stop_all()
+                return
+
+        else:
+
+            stop_all()
+            print(
+                "UNKNOWN MAZE COMMAND:",
+                command
+            )
+
+            return
+
+    stop_all()
+    print("MAZE COMPLETE")
+
+
+# ============================================================
+#                LINE-FOLLOW SENSOR FUNCTIONS
+# ============================================================
+
+def read_line_sensors():
+    """
+    Reads the two downward-facing reflectance sensors.
+    """
+
+    left_value = reflectance.get_left()
+    right_value = reflectance.get_right()
+
+    if INVERT_LINE_READINGS:
+
+        left_value = 1.0 - left_value
+        right_value = 1.0 - right_value
+
+    return left_value, right_value
+
+
+def search_for_line(last_direction):
+    """
+    Gently rotates toward the most recent line direction.
+    """
+
+    search_start_ms = time.ticks_ms()
+
+    while True:
+
+        if emergency_stop_requested():
+
+            stop_all()
+            print("LINE SEARCH EMERGENCY STOP")
+
+            return False
+
+        if controller_disconnected():
+
+            stop_all()
+            print("CONTROLLER DISCONNECTED")
+
+            return False
+
+        if front_wall_detected():
+
+            stop_all()
+            print("WALL DETECTED DURING LINE SEARCH")
+
+            return False
+
+        elapsed_ms = time.ticks_diff(
+            time.ticks_ms(),
+            search_start_ms
+        )
+
+        if elapsed_ms >= LINE_SEARCH_TIMEOUT_MS:
+
+            stop_all()
+            print("BLUE LINE COULD NOT BE FOUND")
+
+            return False
+
+        left_sensor, right_sensor = read_line_sensors()
+
+        difference = abs(
+            left_sensor - right_sensor
+        )
+
+        if difference >= LINE_MIN_DIFFERENCE:
+
+            drivetrain.stop()
+            return True
+
+        if last_direction > 0:
+
+            # Search left.
+            drivetrain.set_effort(
+                -LINE_SEARCH_EFFORT,
+                LINE_SEARCH_EFFORT
+            )
+
+        else:
+
+            # Search right.
+            drivetrain.set_effort(
+                LINE_SEARCH_EFFORT,
+                -LINE_SEARCH_EFFORT
+            )
+
+        time.sleep(LINE_LOOP_DELAY)
+
+
+# ============================================================
+#                BLUE-LINE AUTONOMOUS MODE
+# ============================================================
+
+def run_line_autonomous():
+    """
+    Fully autonomous blue squiggly-line follower.
+
+    The gamepad does not steer the robot in this mode.
+    Hold A for three seconds to stop.
+    """
+
+    stop_all()
+
+    print("BLUE-LINE AUTONOMOUS MODE")
+    print("Place the tape between the floor sensors")
+    print("Starting in 2 seconds")
+
+    time.sleep(2)
+
+    previous_error = 0.0
+    last_direction = 1
+
+    while True:
+
+        if emergency_stop_requested():
+
+            stop_all()
+            print("LINE MODE CANCELLED")
+
+            return
+
+        if controller_disconnected():
+
+            stop_all()
+            print("CONTROLLER DISCONNECTED")
+
+            return
+
+        if front_wall_detected():
+
+            stop_all()
+
+            print("LINE MODE WALL STOP")
+            print(
+                "Front distance:",
+                get_front_distance(),
+                "cm"
+            )
+
+            return
+
+        left_sensor, right_sensor = read_line_sensors()
+
+        error = left_sensor - right_sensor
+
+        if REVERSE_LINE_STEERING:
+            error = -error
+
+        if error > 0:
+            last_direction = 1
+
+        elif error < 0:
+            last_direction = -1
+
+        sensor_difference = abs(
+            left_sensor - right_sensor
+        )
+
+        # Confirm the weak reading before entering search mode.
+        if sensor_difference < LINE_MIN_DIFFERENCE:
+
+            time.sleep(0.025)
+
+            second_left, second_right = read_line_sensors()
+
+            second_difference = abs(
+                second_left - second_right
+            )
+
+            if second_difference < LINE_MIN_DIFFERENCE:
+
+                line_found = search_for_line(
+                    last_direction
+                )
+
+                if not line_found:
+                    stop_all()
+                    return
+
+                previous_error = 0.0
+                continue
+
+        # PD steering correction.
+        derivative = error - previous_error
+
+        steering = (
+            LINE_KP * error
+        ) + (
+            LINE_KD * derivative
+        )
+
+        previous_error = error
+
+        # Slow slightly on larger curves.
+        curve_size = abs(steering)
+
+        drive_speed = (
+            LINE_BASE_SPEED -
+            curve_size * 0.15
+        )
+
+        drive_speed = limit(
+            drive_speed,
+            LINE_MIN_SPEED,
+            LINE_BASE_SPEED
+        )
+
+        left_effort = drive_speed - steering
+        right_effort = drive_speed + steering
+
+        left_effort = limit(
+            left_effort,
+            -LINE_MAX_EFFORT,
+            LINE_MAX_EFFORT
+        )
+
+        right_effort = limit(
+            right_effort,
+            -LINE_MAX_EFFORT,
+            LINE_MAX_EFFORT
+        )
+
+        drivetrain.set_effort(
+            left_effort,
+            right_effort
+        )
+
+        time.sleep(LINE_LOOP_DELAY)
+
+
+# ============================================================
+#                         MAIN LOOP
+# ============================================================
+
+print("ROBOT READY")
+print("Manual mode is active")
+print("Hold D-pad DOWN for maze")
+print("Hold D-pad UP for blue line")
+print("Hold A for 3 seconds to stop")
+
+
+try:
+
+    while True:
+
+        if current_mode == MODE_MANUAL:
+
+            current_mode = manual_control_step()
+
+        elif current_mode == MODE_MAZE:
+
+            run_maze_autonomous()
+            stop_all()
+
+            wait_for_button_release(BUTTON_A)
+
+            current_mode = MODE_MANUAL
+            print("RETURNED TO MANUAL MODE")
+
+        elif current_mode == MODE_LINE:
+
+            run_line_autonomous()
+            stop_all()
+
+            wait_for_button_release(BUTTON_A)
+
+            current_mode = MODE_MANUAL
+            print("RETURNED TO MANUAL MODE")
+
+        else:
+
+            stop_all()
+            current_mode = MODE_MANUAL
+
+        time.sleep(0.01)
+
+
+except KeyboardInterrupt:
+
+    stop_all()
+    print("PROGRAM MANUALLY STOPPED")
+
+
+except Exception as error:
+
+    stop_all()
+
+    print("PROGRAM ERROR:")
+    print(error)
+
+
+finally:
+
+    stop_all()
